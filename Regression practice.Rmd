@@ -1,0 +1,455 @@
+---
+title: "Regression and RNN-LSTM Models"
+author: "Daniel Hill"
+date: "2024-07-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+
+#Load df to keep in original state for reference
+df_orig <- read_excel("combined_df FINAL 2023 Q4 added.xlsx")
+
+#Load data
+df <- read_excel("combined_df FINAL 2023 Q4 added.xlsx")
+
+#Remove fraud offences as data only goes up to 2012
+df <- df[df$`Offence Group` != "Fraud offences", ]
+
+#One-hot encoding of area variable to create numerical northern england, southern england and wales categories
+df <- df %>%
+  mutate(
+    northern_england = if_else(`Force Name` %in% c("Cheshire", "Cleveland", "Cumbria", "Derbyshire", "Durham", "Greater Manchester",
+                                                   "Humberside", "Lancashire", "Leicestershire", "Lincolnshire", "Merseyside", "North Yorkshire",
+                                                   "Northumbria", "Nottinghamshire", "South Yorkshire", "Staffordshire", "West Midlands",
+                                                   "West Yorkshire"), 1, 0),
+    southern_england = if_else(`Force Name` %in% c("Avon & Somerset", "Bedfordshire", "Cambridgeshire", "Devon & Cornwall",
+                                                   "Dorset", "Essex", "Gloucestershire", "Hampshire", "Hertfordshire", "Kent", "London, City of",
+                                                   "Metropolitan Police", "Norfolk", "Northamptonshire", "Suffolk", "Surrey", "Sussex",
+                                                   "Thames Valley", "Warwickshire", "West Mercia", "Wiltshire"), 1, 0),
+    wales = if_else(`Force Name` %in% c("Dyfed-Powys", "Gwent", "North Wales", "South Wales"), 1, 0)
+  )
+
+#Make subset of relevant numerical variables
+df_num <- df[c('Number of Offences', 'Population', 'AREALHECT', 'Pop Density', 'Unemployment rate (%)', 'Median house price income ratio',
+               'Food Inf', 'Alc and Tobacco Inf', 'Clothing Inf', 'Utilities Inf', 'Transport Inf', 'northern_england', 'southern_england',
+               'wales')]
+
+```
+
+```{r}
+library(car)
+library(corrplot)
+
+#Standardise/scale numeric columns of the data
+scale_data <- scale(df_num)
+# Convert to data frame
+scale_data <- as.data.frame(scale_data)
+
+#View corrplot to see which predictor variables are highly correlated
+corrs <- cor(scale_data)
+corrplot(corrs, method="number", tl.cex = 0.5, number.cex = 0.6)
+
+```
+
+```{r}
+#Multiple linear regression model (all crimes)
+crime_model <- lm(`Number of Offences` ~ Population + AREALHECT + `Pop Density` + `Unemployment rate (%)` + `Median house price income ratio` + `Food Inf` + `Alc and Tobacco Inf` + `Clothing Inf` + `Utilities Inf` + `Transport Inf` + `northern_england` + `southern_england` + `wales`, data = scale_data)
+summary(crime_model)
+```
+
+```{r}
+#Save unique crime types
+crime_types <- unique(df$`Offence Group`)
+
+#Create a list to store the models
+models <- list()
+
+for (crime in crime_types) {
+  #Subset the data for the current crime type
+  subset_data <- subset(df, `Offence Group` == crime)
+  
+  #Fit the linear model
+  model <- lm(`Number of Offences` ~ Population + AREALHECT + `Pop Density` + `Unemployment rate (%)` + `Median house price income ratio` + `Food Inf` + `Alc and Tobacco Inf` + `Clothing Inf` + `Utilities Inf` + `Transport Inf` + `northern_england` + `southern_england` + `wales`,  data = subset_data)
+  
+  #Store the model in the list
+  models[[crime]] <- model
+}
+
+#Print the summary of each model
+for (crime in crime_types) {
+  cat("\n\nSummary of the model for", crime, ":\n")
+  print(summary(models[[crime]]))
+}
+
+```
+
+```{r}
+#Produce Long short-term memory LSTM model using Keras
+library(dplyr)
+library(keras)
+library(tensorflow)
+
+#Set the seed for reproducibility
+set.seed(123)
+tensorflow::set_random_seed(123)
+
+#Extract the start year from the Financial Year column
+df$start_year <- as.numeric(sub("/.*", "", df$`Financial Year`))
+
+#Create a proper date starting from April 1st of the start year
+df$start_date <- as.Date(paste0(df$start_year, "-04-01"))
+
+#Create a date column considering the Financial Quarter
+df$date <- df$start_date + months((df$`Financial Quarter` - 1) * 3)
+
+#Remove the intermediate columns
+df <- df %>% select(-start_year, -start_date)
+
+#Create lagged features
+df <- df %>%
+  arrange(`Force Name`, `Offence Group`, date) %>%
+  group_by(`Force Name`, `Offence Group`) %>%
+  mutate(lag_1 = lag(`Number of Offences`, 1),
+         lag_2 = lag(`Number of Offences`, 2),
+         lag_3 = lag(`Number of Offences`, 3)) %>%
+  ungroup() %>%
+  filter(!is.na(lag_1) & !is.na(lag_2) & !is.na(lag_3))
+
+#Save original scales before normalising data
+original_ranges <- df_orig %>%
+  summarise(across(c(`Number of Offences`, Population, `Offences per 1000 population`, AREALHECT, `Pop Density`, 
+                     `Unemployment rate (%)`, `Median house price income ratio`, `Food Inf`, `Alc and Tobacco Inf`, 
+                     `Clothing Inf`, `Utilities Inf`, `Transport Inf`),
+                   list(min = min, max = max))) %>%
+  gather(key, value) %>%
+  separate(key, into = c("variable", "stat"), sep = "_") %>%
+  spread(stat, value)
+
+#Save this to a file so it can be loaded later to return results to original scale
+write.csv(original_ranges, "original_ranges.csv", row.names = FALSE)
+
+#Normalize the data
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+df <- df %>%
+  mutate_at(vars(`Number of Offences`, Population, `AREALHECT`, `Pop Density`, `Unemployment rate (%)`,
+                 `Median house price income ratio`, `Food Inf`, `Alc and Tobacco Inf`, `Clothing Inf`, `Utilities Inf`, `Transport Inf`,
+                 `northern_england`, `southern_england`, `wales`, lag_1, lag_2, lag_3), normalize)
+
+#Define features - removing offences per 1000 population
+features <- c('lag_1', 'lag_2', 'lag_3', 'Population', 'AREALHECT', 'Pop Density',
+              'Unemployment rate (%)', 'Median house price income ratio', 'Food Inf', 'Alc and Tobacco Inf',
+              'Clothing Inf', 'Utilities Inf', 'Transport Inf', 'northern_england', 'southern_england', 'wales')
+
+num_features <- length(features)
+
+#Create the 3D array for LSTM input
+X <- array(data = NA, dim = c(nrow(df), 3, num_features))
+
+#Populate the array
+for (i in 1:nrow(df)) {
+  X[i,,] <- as.matrix(df[i, features])
+}
+
+#Prepare target variable
+y <- df$`Number of Offences`
+
+#Split the data into training and test sets
+set.seed(123)
+
+cutoff_date <- as.Date("2021-12-31")
+
+train_indices <- which(df$date <= cutoff_date)
+test_indices <- which(df$date > cutoff_date)
+
+X_train <- X[train_indices,,]
+y_train <- y[train_indices]
+X_test <- X[-train_indices,,]
+y_test <- y[-train_indices]
+
+#Define the LSTM model
+model <- keras_model_sequential() %>%
+  layer_lstm(units = 50, input_shape = c(3, num_features), return_sequences = TRUE) %>%
+  layer_lstm(units = 50) %>%
+  layer_dense(units = 1)
+
+#Compile the model
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = 'adam'
+)
+
+#Train the model
+history <- model %>% fit(
+  X_train, y_train,
+  epochs = 100,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+#Evaluate the model
+model %>% evaluate(X_test, y_test)
+
+#Make predictions
+predictions <- model %>% predict(X_test)
+
+#Rescale the predictions if necessary (if you scaled your data before training)
+rescale <- function(x, min_val, max_val) {
+  return(x * (max_val - min_val) + min_val)
+}
+
+#Assuming you have the original scale of y
+y_min <- min(df_orig$`Number of Offences`)
+y_max <- max(df_orig$`Number of Offences`)
+
+rescaled_actual <- rescale(y_test, y_min, y_max)
+rescaled_predictions <- rescale(predictions, y_min, y_max)
+
+#Compare predictions with actual values
+comparison <- data.frame(Actual = rescaled_actual, Predicted = rescaled_predictions)
+head(comparison)
+
+```
+
+```{r}
+library(ggplot2)
+
+#Calculate error metrics
+mae <- mean(abs(comparison$Actual - comparison$Predicted))
+mse <- mean((comparison$Actual - comparison$Predicted)^2)
+rmse <- sqrt(mse)
+
+#Calculate R-squared
+tss <- sum((comparison$Actual - mean(comparison$Actual))^2)
+rss <- sum((comparison$Actual - comparison$Predicted)^2)
+r_squared <- 1 - (rss / tss)
+
+#Print error metrics
+cat("MAE:", mae, "\n")
+cat("MSE:", mse, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R-squared:", r_squared, "\n")
+
+#Scatter plot of actual vs. predicted values
+ggplot(comparison, aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual vs. Predicted Number of Offences",
+       x = "Actual Number of Offences",
+       y = "Predicted Number of Offences")
+
+```
+
+```{r}
+#Feature selection
+#Function to calculate RMSE
+rmse <- function(y_true, y_pred) {
+  sqrt(mean((y_true - y_pred)^2))
+}
+
+#Original performance
+original_rmse <- rmse(y_test, predict(model, X_test))
+
+#Calculate importance for each feature
+n_features <- dim(X_test)[3]
+importance <- numeric(n_features)
+
+for(i in 1:n_features) {
+  X_test_permuted <- X_test
+  # Permute the i-th feature across all samples and time steps
+  X_test_permuted[,,i] <- sample(X_test[,,i])
+  permuted_rmse <- rmse(y_test, predict(model, X_test_permuted))
+  importance[i] <- permuted_rmse - original_rmse
+}
+
+#Create feature names if they're not available
+if (is.null(dimnames(X_test)[[3]])) {
+  feature_names <- paste0("Feature_", 1:n_features)
+} else {
+  feature_names <- dimnames(X_test)[[3]]
+}
+
+#Create a dataframe of feature importances
+feature_importance <- data.frame(
+  Feature = feature_names,
+  Importance = importance
+)
+
+#Sort by importance
+feature_importance <- feature_importance[order(-feature_importance$Importance),]
+
+feature_mapping <- setNames(features, paste0("Feature_", 1:length(features)))
+feature_importance$Feature <- feature_mapping[feature_importance$Feature]
+
+#Plot features
+ggplot(feature_importance, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Feature Importance", x = "Features", y = "Importance (Increase in RMSE)") +
+  theme(axis.text.y = element_text(size = 8))  # Adjust text size if needed
+```
+
+```{r}
+#Removing low importance features and re-run the model
+#Set the seed for reproducibility
+set.seed(123)
+tensorflow::set_random_seed(123)
+
+#Extract the start year from the Financial Year column
+df$start_year <- as.numeric(sub("/.*", "", df$`Financial Year`))
+
+#Create a proper date starting from April 1st of the start year
+df$start_date <- as.Date(paste0(df$start_year, "-04-01"))
+
+#Create a date column considering the Financial Quarter
+df$date <- df$start_date + months((df$`Financial Quarter` - 1) * 3)
+
+#Remove the intermediate columns
+df <- df %>% select(-start_year, -start_date)
+
+#Create lagged features
+df <- df %>%
+  arrange(`Force Name`, `Offence Group`, date) %>%
+  group_by(`Force Name`, `Offence Group`) %>%
+  mutate(lag_1 = lag(`Number of Offences`, 1),
+         lag_2 = lag(`Number of Offences`, 2),
+         lag_3 = lag(`Number of Offences`, 3)) %>%
+  ungroup() %>%
+  filter(!is.na(lag_1) & !is.na(lag_2) & !is.na(lag_3))
+
+#Save original scaled before normalising data
+#Store original min and max values
+original_ranges <- df_orig %>%
+  summarise(across(c(`Number of Offences`, Population, `Offences per 1000 population`, AREALHECT, `Pop Density`, 
+                     `Unemployment rate (%)`, `Median house price income ratio`, `Food Inf`, `Alc and Tobacco Inf`, 
+                     `Clothing Inf`, `Utilities Inf`, `Transport Inf`),
+                   list(min = min, max = max))) %>%
+  gather(key, value) %>%
+  separate(key, into = c("variable", "stat"), sep = "_") %>%
+  spread(stat, value)
+
+#Save this to a file so it can be loaded later for predictions
+write.csv(original_ranges, "original_ranges.csv", row.names = FALSE)
+
+#Normalize the data
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+df <- df %>%
+  mutate_at(vars(`Number of Offences`, `AREALHECT`, `Pop Density`, `Unemployment rate (%)`,
+                 `Median house price income ratio`, `Clothing Inf`, `Utilities Inf`, `Transport Inf`,
+                 `southern_england`, `wales`, lag_1, lag_2), normalize)
+
+#Define features - removing offences per 1000 population
+features <- c('lag_1', 'lag_2', 'AREALHECT', 'Pop Density', 'Unemployment rate (%)', 
+              'Median house price income ratio', 'Clothing Inf', 'Utilities Inf', 
+              'Transport Inf', 'southern_england', 'wales')
+
+num_features <- length(features)
+
+#Create the 3D array for LSTM input
+X <- array(data = NA, dim = c(nrow(df), 3, num_features))
+
+#Populate the array
+for (i in 1:nrow(df)) {
+  X[i,,] <- as.matrix(df[i, features])
+}
+
+#Prepare target variable
+y <- df$`Number of Offences`
+
+#Split the data into training and test sets
+set.seed(123)
+
+cutoff_date <- as.Date("2021-12-31")
+
+train_indices <- which(df$date <= cutoff_date)
+test_indices <- which(df$date > cutoff_date)
+
+X_train <- X[train_indices,,]
+y_train <- y[train_indices]
+X_test <- X[-train_indices,,]
+y_test <- y[-train_indices]
+
+#Define the LSTM model
+model <- keras_model_sequential() %>%
+  layer_lstm(units = 50, input_shape = c(3, num_features), return_sequences = TRUE) %>%
+  layer_lstm(units = 50) %>%
+  layer_dense(units = 1)
+
+#Compile the model
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = 'adam'
+)
+
+#Train the model
+history <- model %>% fit(
+  X_train, y_train,
+  epochs = 100,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+#Evaluate the model
+model %>% evaluate(X_test, y_test)
+
+#Make predictions
+predictions <- model %>% predict(X_test)
+
+#Rescale the predictions
+rescale <- function(x, min_val, max_val) {
+  return(x * (max_val - min_val) + min_val)
+}
+
+#Original scale of y
+y_min <- min(df_orig$`Number of Offences`)
+y_max <- max(df_orig$`Number of Offences`)
+
+rescaled_actual <- rescale(y_test, y_min, y_max)
+rescaled_predictions <- rescale(predictions, y_min, y_max)
+
+# Compare predictions with actual values
+comparison <- data.frame(Actual = rescaled_actual, Predicted = rescaled_predictions)
+head(comparison)
+
+```
+
+```{r}
+#Calculate error metrics
+mae <- mean(abs(comparison$Actual - comparison$Predicted))
+mse <- mean((comparison$Actual - comparison$Predicted)^2)
+rmse <- sqrt(mse)
+
+#Calculate R-squared
+tss <- sum((comparison$Actual - mean(comparison$Actual))^2)
+rss <- sum((comparison$Actual - comparison$Predicted)^2)
+r_squared <- 1 - (rss / tss)
+
+#Print error metrics
+cat("MAE:", mae, "\n")
+cat("MSE:", mse, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R-squared:", r_squared, "\n")
+
+#Scatter plot of actual vs. predicted values
+ggplot(comparison, aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual vs. Predicted Number of Offences",
+       x = "Actual Number of Offences",
+       y = "Predicted Number of Offences")
+```
+
+
