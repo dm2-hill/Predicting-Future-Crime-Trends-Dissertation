@@ -12,6 +12,8 @@ git clone https://github.com/dm2-hill/Predicting-Future-Crime-Trends-Dissertatio
 ## Usage
 All codes contain a line to read in the data, which is named 'combined_df FINAL 2023 Q4 added.xlsx'. This data is included in the repository, so once cloned to a local folder the code should be able to run with no problems. Every code is set up so that it should be run without any adjustments being required. 
 
+NOTE: To access the dashboard, once the repository has been cloned, simply run the 'Code for dashboard.py' file and then paste http://127.0.0.1:8050/ into a browser. 
+
 ### Data cleaning and preparation
 The first code is named 'Data cleaning and preparation.py'. At initial download each year of the data was in a separate excel file. I put each of these onto separate sheets in the same excel file. I then loaded this data into python and ran this code. The code cleans the data by converting all zeros in the offence count column to NaN and then removing all rows with NaN. I then checked all column titles are the same across years, and changed any that were not. The code then removes any rows with a negative offence count as it is impossible to have a negative number of crimes. I then calculated the sum of number of offences for every force and offence group and combined everything into one excel file with one sheet. This has already been done in the data included in the Github repository so this code is included just for reference. 
 
